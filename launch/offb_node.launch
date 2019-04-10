@@ -1,0 +1,5 @@
+<launch>
+	<node pkg="offb_node" type="offb_node" name="offb_node" output="screen">
+		<rosparam file="$(find offb_node)/config/offb_node_params.yaml" command="load"/>
+	</node>
+</launch>

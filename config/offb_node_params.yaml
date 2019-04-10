@@ -1,0 +1,6 @@
+z_angle_threshold: rad(30.0) 
+position_threshold: 0.5
+dnn_lock_wait_time: 2.0
+dnn_error_threshold: 0.3
+platform_pos: [15.0, 15.0, 0.0]
+z_landing_vel: 0.5

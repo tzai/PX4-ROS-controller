@@ -1,0 +1,213 @@
+/**
+ * @file offb_node.cpp
+ * @brief Offboard control example node, written with MAVROS version 0.19.x, PX4 Pro Flight
+ * Stack and tested in Gazebo SITL
+ */
+
+#include <ros/ros.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <mavros_msgs/CommandBool.h>
+#include <mavros_msgs/SetMode.h>
+#include <mavros_msgs/State.h>
+#include <dnn_msgs/DnnOutput.h>
+
+#include <math.h>
+
+#include <tf/tf.h>
+#include <tf2/buffer_core.h>
+#include <tf2/LinearMath/Transform.h>
+
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+#include <angles/angles.h>
+#include <eigen_conversions/eigen_msg.h>
+
+enum OffboardState {
+    USER_CTRL, // user has full control and can put drone in other flight modes (altitude, position, manual, etc)
+    DNN_NO_LOCK, // offboard node is in control, but DNN does not have lock. controller is navitating to GPS coordinates of landing platform
+    DNN_LOCK, // DNN has lock, getting ready to land
+    DNN_LOCK_LANDING // DNN has lock, actively landing
+};
+
+#define NUM_WAYPOINTS 3
+
+mavros_msgs::State current_state;
+OffboardState offboard_state = USER_CTRL;
+dnn_msgs::DnnOutput dnn_output;
+geometry_msgs::PoseStamped current_pose, goto_pose, test_waypoints[NUM_WAYPOINTS];
+ros::Time last_log_time, dnn_lock_time;
+int waypoint_index = 0;
+
+// thresholds
+double z_axis_threshold = cos(M_PI/6); // when z axis is off by 30 degrees from vertical
+double position_threshold = 0.2;
+double dnn_lock_wait_time = 4.0;
+
+void stateCallback(const mavros_msgs::State::ConstPtr& msg){
+    current_state = *msg;
+}
+
+void poseCallback(const geometry_msgs::PoseStamped::ConstPtr &msg) {
+    // Update state, TODO: add spinlock if threaded?
+    current_pose = *msg;
+    // end of lock
+
+    //check if drone is out of the horizontal plane by more than the allowed threshold
+    Eigen::Quaterniond current_orientation;
+    tf::quaternionMsgToEigen(current_pose.pose.orientation, current_orientation);
+    Eigen::Matrix3d rotation_mat = current_orientation.toRotationMatrix();
+    // compares vertical component of the Z axis of the rotation matrix to the defined threshold
+    if((offboard_state == DNN_LOCK || offboard_state == DNN_LOCK_LANDING) && rotation_mat(2, 2) < z_axis_threshold) {
+        offboard_state = DNN_NO_LOCK;
+        waypoint_index = 0; // reset to first waypoint
+        ROS_INFO("Z axis threshold exceeded! Reverting to DNN_NO_LOCK state");
+    }
+
+    if(ros::Time::now() - last_log_time > ros::Duration(1.0)) {
+        Eigen::Vector3d euler_angles = rotation_mat.eulerAngles(0,1,2);
+
+        ROS_INFO("Pos:%4.2f, %4.2f, %4.2f, Att:%4.2f, %4.2f, %4.2f",
+                 current_pose.pose.position.x, current_pose.pose.position.y, current_pose.pose.position.z,
+                 angles::to_degrees(euler_angles[0]), angles::to_degrees(euler_angles[1]), angles::to_degrees(euler_angles[2]));
+
+        last_log_time = ros::Time::now();
+    }
+}
+
+void dnnCallback(const dnn_msgs::DnnOutput::ConstPtr &msg) {
+    dnn_output = *msg;
+
+    // for now, always trust DNN. TODO: make this check validate that we are close to the platform according to the GPS as well
+    if(offboard_state == DNN_NO_LOCK && dnn_output.has_lock) {
+        offboard_state = DNN_LOCK;
+    } else if((offboard_state == DNN_LOCK || offboard_state == DNN_LOCK_LANDING) && !dnn_output.has_lock) { // if lock has been lost
+        offboard_state = DNN_NO_LOCK;
+    }
+}
+
+inline float getPoseDistance(geometry_msgs::PoseStamped& pose1, geometry_msgs::PoseStamped& pose2) {
+    Eigen::Vector3d point1;
+    tf::pointMsgToEigen(pose1.pose.position, point1);
+    Eigen::Vector3d point2;
+    tf::pointMsgToEigen(pose2.pose.position, point2);
+    float distance = (point1-point2).norm();
+
+    return distance;
+}
+
+int main(int argc, char **argv)
+{
+    ros::init(argc, argv, "offb_node");
+    ros::NodeHandle nh;
+
+    ROS_INFO("Started offb_node");
+
+    const int QUEUE_SIZE = 10;
+    ros::Subscriber state_sub = nh.subscribe<mavros_msgs::State>("mavros/state", QUEUE_SIZE, stateCallback);
+    ros::Subscriber local_pos_sub = nh.subscribe<geometry_msgs::PoseStamped>("mavros/local_position/pose", QUEUE_SIZE, poseCallback);
+    ros::Subscriber dnn_output_sub = nh.subscribe<dnn_msgs::DnnOutput>("dnn/deltas", QUEUE_SIZE, dnnCallback);
+
+    ros::Publisher local_pos_pub = nh.advertise<geometry_msgs::PoseStamped>("mavros/setpoint_position/local", QUEUE_SIZE);
+    
+    ros::ServiceClient arming_client = nh.serviceClient<mavros_msgs::CommandBool>("mavros/cmd/arming");
+    ros::ServiceClient set_mode_client = nh.serviceClient<mavros_msgs::SetMode>("mavros/set_mode");
+
+
+    //the setpoint publishing rate MUST be faster than 2Hz
+    ros::Rate rate(20.0);
+
+    // wait for FCU connection
+    while(ros::ok() && !current_state.connected){
+        ros::spinOnce();
+        rate.sleep();
+    }
+
+    Eigen::Quaterniond rotation_q;
+    rotation_q = Eigen::AngleAxis<double>(M_PI/2.0, Eigen::Vector3d::UnitZ());
+
+    test_waypoints[0].pose.position.x = 0;
+    test_waypoints[0].pose.position.y = 0;
+    test_waypoints[0].pose.position.z = 5;
+
+    test_waypoints[1].pose.position.x = 0;
+    test_waypoints[1].pose.position.y = 15;
+    test_waypoints[1].pose.position.z = 5;
+    tf::quaternionEigenToMsg(rotation_q, test_waypoints[1].pose.orientation);
+
+    test_waypoints[2].pose.position.x = 15;
+    test_waypoints[2].pose.position.y = 15;
+    test_waypoints[2].pose.position.z = 2;
+
+    //send a few setpoints before starting
+    for(int i = 100; ros::ok() && i > 0; --i){
+        local_pos_pub.publish(goto_pose);
+        ros::spinOnce();
+        rate.sleep();
+    }
+
+    mavros_msgs::SetMode offb_set_mode;
+    offb_set_mode.request.custom_mode = "OFFBOARD";
+
+    mavros_msgs::CommandBool arm_cmd;
+    arm_cmd.request.value = true;
+
+    ros::Time last_request = ros::Time::now();
+    last_log_time = ros::Time::now();
+
+    offboard_state = USER_CTRL;
+    ROS_INFO("Starting main spin loop");
+    while(ros::ok()){
+        switch(offboard_state) {
+        case USER_CTRL:
+            if(current_state.mode != "OFFBOARD" && (ros::Time::now() - last_request > ros::Duration(5.0))){
+                if(set_mode_client.call(offb_set_mode) && offb_set_mode.response.mode_sent){
+                    ROS_INFO("Offboard enabled");
+                }
+                last_request = ros::Time::now();
+            } else {
+                if(!current_state.armed && (ros::Time::now() - last_request > ros::Duration(5.0))){
+                    if(arming_client.call(arm_cmd) && arm_cmd.response.success){
+                        offboard_state = DNN_NO_LOCK;
+                        ROS_INFO("Vehicle armed");
+                    }
+                    last_request = ros::Time::now();
+                }
+            }
+            break;
+        case DNN_NO_LOCK:
+            goto_pose = test_waypoints[waypoint_index];
+            if(getPoseDistance(current_pose, goto_pose) <= position_threshold) {
+                if(waypoint_index == NUM_WAYPOINTS - 1) {
+                    offboard_state = DNN_LOCK;
+                    dnn_lock_time = ros::Time::now();
+                    ROS_INFO("Reached final waypoint. Entering DNN_LOCK state");
+                } else {
+                    waypoint_index++;
+                    ROS_INFO("Reached waypoint. Targeting next waypoint");
+                }
+            }
+            break;
+        case DNN_LOCK:
+            goto_pose = test_waypoints[NUM_WAYPOINTS - 1];
+            if(ros::Time::now() - dnn_lock_time > ros::Duration(dnn_lock_wait_time)) {
+                offboard_state = DNN_LOCK_LANDING;
+                ROS_INFO("Achieved DNN_LOCK for %f seconds. Entering DNN_LOCK_LANDING state", dnn_lock_wait_time);
+            }
+            break;
+        case DNN_LOCK_LANDING:
+            // TODO: do landing
+            break;
+        
+        default:
+            ROS_ERROR("Unknown controller state in main loop");
+            return -1;
+        }
+
+        local_pos_pub.publish(goto_pose);
+
+        ros::spinOnce();
+        rate.sleep();
+    }
+
+    return 0;
+}
