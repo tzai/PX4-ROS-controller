@@ -337,10 +337,11 @@ int main(int argc, char **argv)
                 goto_pose.pose.position.y = (*pos)[1];
                 goto_pose.pose.position.z = (*pos)[2];
                 trajectory.pop_front();
-                trajectory_log << boost::format("%.3lf,%.3lf,%.3lf,%.3lf,%.3lf\n")
+                trajectory_log << boost::format("%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf%.3lf\n")
                     % ros::Time::now().toSec() 
                     % goto_pose.pose.position.x % goto_pose.pose.position.y % goto_pose.pose.position.z
-                    % dnn_error_threshold;
+                    % dnn_trajectory_err
+                    % current_pose.pose.position.x % current_pose.pose.position.y % current_pose.pose.position.z;
             } else {
                 ROS_INFO("ran out of trajectory points while landing. This shouldn't happen while DNN is running");
             }
