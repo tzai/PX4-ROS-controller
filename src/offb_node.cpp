@@ -210,7 +210,7 @@ int main(int argc, char **argv)
     }
     sprintf(log_name, "trajectory_log_%lf.log", ros::Time::now().toSec());
     trajectory_log.open(log_name);
-    trajectory_log << "time,goto_x,goto_y,goto_z,error\n";
+    trajectory_log << "time,goto_x,goto_y,goto_z,error,current_x,current_y,current_z\n";
 
     double z_angle_threshold;
     std::vector<double> platform_pos;
@@ -337,7 +337,7 @@ int main(int argc, char **argv)
                 goto_pose.pose.position.y = (*pos)[1];
                 goto_pose.pose.position.z = (*pos)[2];
                 trajectory.pop_front();
-                trajectory_log << boost::format("%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf%.3lf\n")
+                trajectory_log << boost::format("%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf,%.3lf\n")
                     % ros::Time::now().toSec() 
                     % goto_pose.pose.position.x % goto_pose.pose.position.y % goto_pose.pose.position.z
                     % dnn_trajectory_err
